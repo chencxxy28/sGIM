@@ -1,0 +1,158 @@
+---
+title: "Tutorial"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Tutorial}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+**sGIM** is a semi-parametric constrained optimization-based approach to integrate summary information from the external source while accounting for outcome-dependent selection bias
+
+Recent years have witnessed a rise in the popularity of information integration without sharing of raw data. By leveraging and incorporating summary information from external sources, internal studies can realize enhanced estimation efficiency and prediction accuracy. However, a noteworthy challenge in utilizing summary-level information is accommodating the inherent heterogeneity across diverse data sources. In this study, we delve into the issue of selection bias present in two cohorts, wherein the bias function depends on the outcome. We introduce a novel semi-parametric constrained optimization-based approach to integrate information within this framework, which has not been extensively explored in existing literature. Our proposed method tackles selection bias by considering the outcome-dependent bias function and effectively addresses the estimation uncertainty associated with summary information from the external source. Our approach facilitates valid inference even in the absence of a known variance-covariance estimate from the external source.
+
+# Installation the package
+To begin with, the user need to install our packages
+```{r, eval=FALSE}
+if (!require("devtools")) {
+  install.packages("devtools")
+}
+devtools::install_github("chencxxy28/sGIM")
+```
+
+Load necessary packages
+```{r load library, eval=FALSE}
+library(sGIM)
+library(mvtnorm)
+library(rootSolve)
+library(MASS)
+library(Matrix)
+library(sandwich)
+```
+
+Generate data with binary outcomes, for illustration. The label shift parameter is set to be 0.5. We use rejection sampling procedure to generate the external data with label shift
+```{r generate data, eval=FALSE}
+#basic setups
+ratio<-3
+n<-1000
+N<-100000
+n_ext<-n*ratio
+num.iter<-20
+num.cov<-4
+betaT<-rep(0.5,num.cov+3)
+gammaT<-0.5
+used_index<-c(1:5)
+sigma.cov<-diag(0.3,num.cov)
+sigma.cov[,]<-0.3
+diag(sigma.cov)<-1
+
+#generalte external data
+  ##do rejection sampling
+  num.big<-round(N/(1/exp(0.5)))
+  z1_all<-rbinom(num.big,1,0.5)
+  z2_all<-runif(num.big,0,1)
+  x_raw_all<-rmvnorm(num.big,rep(0,num.cov),sigma.cov)
+  x1_all<-x_raw_all[,1]+z1_all
+  x2_all<-x_raw_all[,2]+z2_all
+  x3_all<-x_raw_all[,3]
+  x4_all<-x_raw_all[,4]
+  x_all<-cbind(1,x1_all,x2_all,x3_all,x4_all,z1_all,z2_all)
+  mu_all<-(1+exp(-x_all%*%betaT))^(-1)
+  y_all<-rbinom(num.big,1,mu_all)
+  
+  ##check
+  eva<-runif(num.big,0,1)
+  use_index<-ifelse(eva<(exp(gammaT*y_all)/(0.745861*exp(gammaT)+(1-0.745861)))/
+                      (1.1*exp(gammaT)),1,0)
+  table(use_index)
+  
+  ##make external data
+  ext_used<-sample(1:sum(use_index),n_ext)
+  y_ext<-y_all[use_index==1][ext_used]
+  x_ext<-x_all[use_index==1,][ext_used,]
+  dim(x_ext)
+  
+  
+  
+  #generate internal data
+  z1_int<-rbinom(n,1,0.5)
+  z2_int<-runif(n,0,1)
+  x_raw_int<-rmvnorm(n,rep(0,num.cov),sigma.cov)
+  x1_int<-x_raw_int[,1]+z1_int
+  x2_int<-x_raw_int[,2]+z2_int
+  x3_int<-x_raw_int[,3]
+  x4_int<-x_raw_int[,4]
+  x_int<-cbind(1,x1_int,x2_int,x3_int,x4_int,z1_int,z2_int)
+  mu_int<-(1+exp(-x_int%*%betaT))^(-1)
+  y_int<-rbinom(n,1,mu_int)
+  
+  prop.table(table(y_int))
+  prop.table(table(y_ext))
+
+   ##calculate theta (summary estimates in the reduced model based on the external data)
+    fit<-glm(y_ext~x_ext[,used_index]-1,family = binomial(link = "logit"))
+  theta_ext<-c(fit$coefficients)
+  
+  theta_ext_est<-theta_ext_ini<-theta_ext
+```
+
+Calculate the variance-covariance matrix for the parameters in the reduced model based on the external data
+```{r get variance-covariance matrix, eval=FALSE}
+  ###estimate theta variance
+  sandwith_self<-function(y_ext,x_ext,theta_ext,used_index)
+  {
+    n<-length(y_ext)
+    ee_all<-0
+    dee_all<-0
+    for(i in 1:n)
+    {
+      mu_i<-(1+exp(-x_ext[i,used_index]%*%theta_ext))^(-1)
+      ee_i<-c(x_ext[i,used_index])*c(y_ext[i]-mu_i)
+      dee_i<--c(x_ext[i,used_index])%*%t(x_ext[i,used_index])*c(mu_i)*c(1-mu_i)
+      
+      ee_all<-ee_all+ee_i%*%t(ee_i)/n
+      dee_all<-dee_all+dee_i/n
+    }
+    ginv(dee_all)%*%ee_all%*%ginv(dee_all)/n
+  }
+  v_ext<-sandwith_self(y_ext,x_ext,theta_ext,used_index)
+```
+
+Conduct information integration by incorporating summary estimate (theta_ext_est) and variance matrix (v_ext) into the main model
+```{r sGIM data integration, eval=FALSE}
+ fit<-glm(y_int~x_int-1,family = binomial(link = "logit"))
+  beta_mle<-c(fit$coefficients)
+  beta_initial<-beta_mle #use mle as initial values of beta
+  
+  all_results<-information.borrowing_lgim_binary(beta_initial=beta_initial,gamma_initial=0.5,theta_ext_ini=theta_ext_ini,theta_ext_est=theta_ext_est,v_ext=v_ext, y_int=y_int,x_int=x_int,used_index=used_index) #here gamma can be valued zero as initial, but it may take more time
+
+  beta_est<-all_results$beta_est #main parameters in the full model
+  gamma_est<-all_results$gamma_est #shift parameter
+  theta_est<-all_results$theta_est #estimated parameters in the reduced model
+```
+
+Calculate the asymptotic standard errors 
+```{r sGIM asymptotic variance, eval=FALSE}
+V_asymptotic<-asymptotic_var_general_binary(beta_est=beta_est,gamma_est=gamma_est,theta_est=theta_est,v_ext=v_ext,y_int=y_int,x_int=x_int,used_index=used_index)
+  V_asymptotic<-V_asymptotic[-c(1:nrow(v_ext)),-c(1:nrow(v_ext))] #the first nrow(v_ext) elements are related to lagrange multiplier
+  beta_v_iter<-sqrt(diag(V_asymptotic[1:ncol(x_int),1:ncol(x_int)])) #asymptotic standard error for main parameters in the full model
+  gamma_v_iter<-sqrt((V_asymptotic[ncol(x_int)+1,ncol(x_int)+1]))#asymptotic standard error for the shift parameter
+  theta_v_iter<-sqrt(diag(V_asymptotic[-c(1:(ncol(x_int)+1)),-c(1:(ncol(x_int)+1))])) #asymptotic standard error for estimated parameters in the reduced model
+```
+
+To compare, we also provide the function for GIM estimate, which could lead to biased estimates in the presence of label shift. 
+```{r GIM, eval=FALSE}
+all_results_gim<-information.borrowing_gim(beta_initial=beta_initial,theta_ext_ini=theta_ext_ini,theta_ext_est=theta_ext_est,v_ext=v_ext,y_int=y_int,x_int=x_int,used_index=used_index)
+
+beta_est_gim<-all_results_gim$beta_est
+```
+
+
+When the variance-covariance matrix is not available, we should apply the proposed iterative updating scheme to recover the matrix v_ext and do information integration. More demos including the case of continuous outcome will be uploaded shortly.
+
+
+
