@@ -67,7 +67,24 @@
 <div class="page-header"><h1 id="sgim">sGIM<a class="anchor" aria-label="anchor" href="#sgim"></a>
 </h1></div>
 <p>Integrating External Summary Information in the Presence of Prior Probability Shift</p>
+<p><strong>Background</strong>: Recent years have witnessed a rise in the popularity of information integration without sharing of raw data. By leveraging and incorporating summary information from external sources, internal studies can realize enhanced estimation efficiency and prediction accuracy. However, a noteworthy challenge in utilizing summary-level information is accommodating the inherent heterogeneity across diverse data sources. In this study, we delve into the issue of selection bias present in two cohorts, wherein the bias function depends on the outcome. We introduce a novel semi-parametric constrained optimization-based approach to integrate information within this framework, which has not been extensively explored in existing literature. Our proposed method tackles selection bias by considering the outcome-dependent bias function and effectively addresses the estimation uncertainty associated with summary information from the external source. Our approach facilitates valid inference even in the absence of a known variance-covariance estimate from the external source.</p>
+<p><strong>sGIM</strong> is a semi-parametric constrained optimization-based approach to integrate summary information from the external source while accounting for outcome-dependent selection bias.</p>
 </div>
+<div class="section level1">
+<h1 id="installation">Installation<a class="anchor" aria-label="anchor" href="#installation"></a>
+</h1>
+<div class="sourceCode" id="cb1"><pre class="downlit sourceCode r">
+<code class="sourceCode R"><span><span class="kw">if</span> <span class="op">(</span><span class="op">!</span><span class="kw"><a href="https://rdrr.io/r/base/library.html" class="external-link">require</a></span><span class="op">(</span><span class="st"><a href="https://devtools.r-lib.org/" class="external-link">"devtools"</a></span><span class="op">)</span><span class="op">)</span> <span class="op">{</span></span>
+<span>  <span class="fu"><a href="https://rdrr.io/r/utils/install.packages.html" class="external-link">install.packages</a></span><span class="op">(</span><span class="st">"devtools"</span><span class="op">)</span></span>
+<span><span class="op">}</span></span>
+<span><span class="fu">devtools</span><span class="fu">::</span><span class="fu"><a href="https://remotes.r-lib.org/reference/install_github.html" class="external-link">install_github</a></span><span class="op">(</span><span class="st">"chencxxy28/sGIM"</span><span class="op">)</span></span></code></pre></div>
+</div>
+<div class="section level1">
+<h1 id="vignettes">Vignettes<a class="anchor" aria-label="anchor" href="#vignettes"></a>
+</h1>
+<p>Please visit <a href="https://chencxxy28.github.io/eMultiMR/articles/NAME-OF-VIGNETTE.html" class="external-link">Tutorial</a></p>
+</div>
+
   </main><aside class="col-md-3"><div class="links">
 <h2 data-toc-skip>Links</h2>
 <ul class="list-unstyled">
