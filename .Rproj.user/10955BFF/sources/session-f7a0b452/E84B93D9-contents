@@ -1,0 +1,1603 @@
+library(mvtnorm)
+library(rootSolve)
+library(MASS)
+library(Matrix)
+library(sandwich)
+
+seed = commandArgs(trailingOnly=TRUE)
+seed = as.numeric(seed)
+set.seed(seed)
+
+##use lgim with gamma
+information.borrowing_lgim<-function(beta_initial,gamma_initial,
+                                  theta_ext_ini,theta_ext_est,v_ext,
+                                  y_int,x_int,used_index)
+{
+  n<-nrow(x_int)
+  
+  #estimating function phi
+  ee_ib<-function(x_int,theta_ext,used_index,beta,gamma)
+  {
+    p_i<-(1+exp(-x_int%*%beta))^(-1)
+    p_red_i<-(1+exp(-x_int[,used_index]%*%theta_ext))^(-1)
+    #estimating function
+    ee<-x_int[,used_index]*c(1-p_red_i)*exp(gamma)*c(p_i)+
+      x_int[,used_index]*c(0-p_red_i)*c(1-p_i)
+    phi_ee<-t(ee)
+    #derivative of estimating function
+    dphi_ee<-lapply(1:n,function(x)
+    {
+      dphi_ee1<-x_int[x,used_index]%*%t(x_int[x,])*c(1-p_red_i[x])*exp(gamma)*
+        c(p_i[x])*c(1-p_i[x])-
+        x_int[x,used_index]%*%t(x_int[x,])*c(0-p_red_i[x])*
+        c(p_i[x])*c(1-p_i[x]) #derivative with respect to beta
+      dphi_ee2<-x_int[x,used_index]*c(1-p_red_i[x])*exp(gamma)*c(p_i[x]) #derivative with respect to gamma
+      dphi_ee3<--x_int[x,used_index]%*%t(x_int[x,used_index])*exp(gamma)*
+        c(p_i[x])*c(p_red_i[x])*c(1-p_red_i[x])-
+        x_int[x,used_index]%*%t(x_int[x,used_index])*
+        c(1-p_i[x])*c(p_red_i[x])*c(1-p_red_i[x]) #derivative with respect to theta
+        
+      cbind(dphi_ee1,dphi_ee2,dphi_ee3)
+    }
+    )
+    dphi_ee<-do.call(cbind,dphi_ee)
+    return(cbind(phi_ee,dphi_ee))
+  }
+  
+  #lambda_find
+  lambda_find<-function(beta,gamma,theta_ext)
+  {
+    ZZ<-ee_ib(x_int,theta_ext,used_index,beta,gamma)[,1:(n)]
+    dim(ZZ)
+    apply(ZZ,1,mean)
+    
+    gamma_e<-1
+    c<-0
+    lambda<-rep(0,nrow(ZZ))
+    tol<-10e-7
+    Delta_old<-0
+    
+    repeat{
+      rl<-R1der(lambda,ZZ)
+      rll<-R2der(lambda,ZZ)
+      Delta<--ginv(rll)%*%rl
+      if(mean(abs(Delta))<tol | mean(Delta-Delta_old)==0 | c>100)
+      {break}else{
+        repeat{
+          mm<-0
+          repeat{
+            delta<-gamma_e*Delta
+            index_1<-apply(ZZ,2,function (xx)
+            {ifelse(1+t(lambda+delta)%*%as.matrix(xx,ncol=1)<=1/n,1,0)}
+            )
+            if (sum(index_1)>0)
+            {gamma_e<-gamma_e/2
+            mm<-mm+1}else{break}}
+          index_2<-ifelse(R0der(lambda+delta,ZZ)-R0der(lambda,ZZ)<0,1,0)
+          if (index_2==1)
+          {gamma_e<-gamma_e/2}else{break}
+        }
+        Delta_old<-Delta
+      }
+      lambda<-lambda+delta
+      c<-c+1
+      gamma_e<-(c)^(-0.5)
+    }
+    lambda
+  }
+  
+  ##first derivative of -log EL
+  R1der<-function(lambda,ZZ)
+  {
+    apply(ZZ,2,function(xx)
+    {as.matrix(xx,ncol=1)/as.vector((1+t(lambda)%*%as.matrix(xx,ncol=1)))})%*%rep(1,ncol(ZZ))
+  }
+  
+  #second derivative of -log EL
+  R2der<-function(lambda,ZZ)
+  {
+    r2der<-0
+    for(i in 1:ncol(ZZ))
+    {
+      r2der_i<--as.matrix(ZZ[,i],ncol=1)%*%t(as.matrix(ZZ[,i],ncol=1))/as.vector(1+t(lambda)%*%as.matrix(ZZ[,i],ncol=1))^2
+      r2der<-r2der+r2der_i
+    }
+    r2der
+  }
+  
+  #-log EL
+  R0der<-function(lambda,ZZ)
+  {
+    apply(ZZ,2, function (xx) {log(as.vector(1+t(lambda)%*%as.matrix(xx,ncol=1)))})%*%rep(1,ncol(ZZ))
+  }
+  
+  #estimate beta finally
+  beta_ee<-function(beta,gamma,theta_ext,theta_ext_est,v_ext,used_index,x_int)
+  {
+    
+    #parameter_all<-c(beta,gamma)
+    
+    lambda<-lambda_find(beta,gamma,theta_ext)
+    
+    
+    M_lh<-function(beta,gamma,theta_ext){
+      m_sum<-0
+      lambda<-lambda_find(beta,gamma,theta_ext)
+      total<-ee_ib(x_int=x_int,theta_ext=theta_ext,
+                   used_index=used_index,beta=beta,gamma=gamma)
+      ZZ<-total[,1:(n)]
+      
+      #try 
+      L<-0
+      f<-0
+      for (i in 1:n)
+      {
+        L_i<--log(1+t(matrix(lambda,ncol=1))%*%ZZ[,i])
+        f_i<-y_int[i]*log((1+exp(-x_int[i,]%*%beta))^(-1))+(1-y_int[i])*log(1-(1+exp(-x_int[i,]%*%beta))^(-1))
+        m_sum<-m_sum+L_i+f_i
+        
+        #try
+        L<-L+L_i
+        f<-f+f_i
+      }
+      m_sum-t(theta_ext-theta_ext_est)%*%ginv(v_ext)%*%(theta_ext-theta_ext_est)/2
+    }
+    
+    l<-1
+    repeat
+    {
+      total<-ee_ib(x_int=x_int,theta_ext=theta_ext,
+                   used_index=used_index,beta=beta,gamma=gamma)
+      
+      #total<-g_fct(beta=beta,beta_external=beta_external,y_main=y_main,x_main=x_main, cali.matrix=cali.matrix, ind.ex=ind.ex,cal.score=cal.score)
+      
+      #total<-g_fct(beta=beta,beta_external=beta_external,y_main=y_main,x_main=x_main)
+      #total<-wgeef(beta=beta,adata,r=r,id=id,dist=dist,time=time,n=n)
+      ZZ<-total[,1:(n)]
+      ZZ_d<-total[,(n+1):((ncol(x_int)+1+length(used_index)+1)*(n-1)+ncol(x_int)+1+length(used_index)+1)]
+      tau<-1
+      s_ee_sum<-0
+      ds_ee_sum<-0
+      for1_sum<-0
+      for2_sum<-0
+      for3_sum<-0
+      for (i in 1:(n))
+      {
+        scaler<-(1/(1+t(matrix(lambda,ncol=1))%*%ZZ[,i]))
+        
+        s_ee_i<-matrix(x_int[i,],ncol=1)%*%(y_int[i]-(1+exp(-x_int[i,]%*%beta))^(-1))
+        s_ee_i<-c(s_ee_i,0,rep(0,length(used_index)))
+        
+        ds_ee1_i<--(matrix(x_int[i,],ncol=1)%*%matrix(x_int[i,],nrow=1)*
+                     as.vector((1+exp(-x_int[i,]%*%beta))^(-1))*
+                     as.vector(1-(1+exp(-x_int[i,]%*%beta))^(-1)))
+        ds_ee1_i<-cbind(ds_ee1_i,0,matrix(0,nrow=nrow(ds_ee1_i),
+                               ncol=length(used_index)))
+        ds_ee_i<-rbind(ds_ee1_i,
+                       matrix(0,nrow=length(used_index)+1,ncol=ncol(ds_ee1_i)))
+        
+        for1_i<-matrix(t(ZZ_d[,((i-1)*(ncol(x_int)+1+length(used_index))+1):
+                                (i*(ncol(x_int)+1+length(used_index)))]),
+                       nrow=ncol(x_int)+1+length(used_index))*as.vector(scaler)
+        for2_i<-ZZ[,i]%*%t(ZZ[,i])*as.vector(scaler^2)
+        for3_i<-t(for1_i)
+        
+        s_ee_sum<-s_ee_sum+s_ee_i
+        ds_ee_sum<-ds_ee_sum+ds_ee_i
+        for1_sum<-for1_sum+for1_i
+        for2_sum<-for2_sum+for2_i
+        for3_sum<-for3_sum+for3_i
+        
+      }
+      M_b<-s_ee_sum-for1_sum%*%matrix(lambda,ncol=1)-c(rep(0,ncol(x_int)+1),ginv(v_ext)%*%(theta_ext-theta_ext_est))
+      adjust_2ed<-diag(0,ncol(x_int)+1+length(used_index))
+      adjust_2ed[-c(1:(ncol(x_int)+1)),-c(1:(ncol(x_int)+1))]<-ginv(v_ext)
+      m_bb<-ds_ee_sum-for1_sum%*%ginv(for2_sum)%*%for3_sum-adjust_2ed #it has been checked, should be negative sign!  #recheck the last term, positive or negative
+      delta<-ginv(m_bb)%*%M_b
+      beta_update<-beta-tau*delta[1:ncol(x_int)]
+      theta_ext_update<-theta_ext-tau*delta[-c(1:(ncol(x_int)+1))]
+      
+      ##keep gamma small
+      gamma_update<-gamma-tau*delta[ncol(x_int)+1]
+      ll<-1
+      repeat{
+        if(abs(gamma_update)<20)
+        {break}else{
+          ll<-ll+1
+          gamma_update<-gamma-tau/ll*delta[ncol(x_int)+1]
+          beta_update<-beta-tau/ll*delta[1:ncol(x_int)]
+          theta_ext_update<-theta_ext-tau/ll*delta[-c(1:(ncol(x_int)+1))]
+          
+        }
+      }
+      
+      
+      
+      jj<-1
+      repeat{
+        criterion_update<-M_lh(beta_update,gamma_update,theta_ext_update)
+        criterion_old<-M_lh(beta,gamma,theta_ext)
+        
+        if(!is.na(criterion_update) & !is.na(criterion_old) & criterion_update >criterion_old | jj>6)
+        {
+          break
+        }else{
+          tau<-tau/2
+          beta_update<-beta-tau*delta[1:ncol(x_int)]
+          ##keep gamma small
+          gamma_update<-gamma-tau*delta[ncol(x_int)+1]
+          theta_ext_update<-theta_ext-tau*delta[-c(1:(ncol(x_int)+1))]
+          
+          ll<-1
+          repeat{
+            if(abs(gamma_update)<20){break}else{
+              ll<-ll+1
+              gamma_update<-gamma-tau/ll*delta[ncol(x_int)+1]
+              beta_update<-beta-tau/ll*delta[1:ncol(x_int)]
+              theta_ext_update<-theta_ext-tau/ll*delta[-c(1:(ncol(x_int)+1))]
+              
+            }
+          }
+          jj<-jj+1
+        }
+      }
+      
+      if(mean(abs(beta_update-beta))<1e-4 | l>30)
+      {break}else{
+        beta<-beta_update
+        gamma<-gamma_update
+        theta_ext<-theta_ext_update
+        lambda<-lambda_find(beta,gamma,theta_ext)
+        l<-l+1
+      }
+      
+    }
+    
+    total<-ee_ib(x_int=x_int,theta_ext=theta_ext,
+                 used_index=used_index,beta=beta,gamma=gamma)
+    ZZ<-total[,1:(n)]
+    Pi<-1/(1+t(matrix(lambda,ncol=1))%*%ZZ)/n
+    return(list(beta_final=beta_update,gamma_final=gamma_update,
+                theta_final=theta_ext_update,l=l,lambda=lambda,Pi=Pi))
+  }
+  
+  final_results<-beta_ee(beta_initial,gamma_initial,theta_ext_ini,
+                         theta_ext_est,v_ext,used_index,x_int)
+  lambda_final<-final_results$lambda
+  beta_est<-final_results$beta_final
+  gamma_est<-final_results$gamma_final
+  theta_est<-final_results$theta_final
+  Pi<-final_results$Pi
+  list(beta_est=beta_est,
+       gamma_est=gamma_est,
+       theta_est=theta_est,
+       lambda=lambda_final,
+       Pi=Pi)
+}
+
+##calculate asymptotic variance
+asymptotic_var<-function(beta_est=beta_est,gamma_est=gamma_est,
+                         theta_est=theta_est,v_ext=v_ext,
+                         y_int=y_int,x_int=x_int,used_index=used_index)
+{
+  n<-nrow(x_int)
+  ds_ee1_mean<-0
+  Jtt_mean<-0
+  Jtu_mean<-0
+  for(x in 1:n)
+  {
+    # s_ee_i<-matrix(x_int[x,],ncol=1)%*%(y_int[x]-(1+exp(-x_int[x,]%*%beta_est))^(-1))
+    # s_ee_i<-c(s_ee_i,0,rep(0,length(used_index)))
+    
+    p_i<-(1+exp(-x_int[x,]%*%beta_est))^(-1)
+    p_red_i<-(1+exp(-x_int[x,used_index]%*%theta_est))^(-1)
+    #estimating function
+    ee<-x_int[x,used_index]*c(1-p_red_i)*exp(gamma_est)*c(p_i)+
+      x_int[x,used_index]*c(0-p_red_i)*c(1-p_i)
+    phi_ee_i<-(ee)
+    
+    ###-E(gg)
+    Egg_i<--phi_ee_i%*%t(phi_ee_i)/n
+    Jtt_mean<-Jtt_mean+Egg_i
+    
+    #derivative of estimating function
+    dphi_ee1<-x_int[x,used_index]%*%t(x_int[x,])*c(1-p_red_i)*exp(gamma_est)*
+      c(p_i)*c(1-p_i)-
+      x_int[x,used_index]%*%t(x_int[x,])*c(0-p_red_i)*
+      c(p_i)*c(1-p_i) #with respect to beta
+    dphi_ee2<-x_int[x,used_index]*c(1-p_red_i)*exp(gamma_est)*c(p_i) #with respect to gamma
+    dphi_ee3<--x_int[x,used_index]%*%t(x_int[x,used_index])*exp(gamma_est)*
+      c(p_i)*c(p_red_i)*c(1-p_red_i)-
+      x_int[x,used_index]%*%t(x_int[x,used_index])*
+      c(1-p_i)*c(p_red_i)*c(1-p_red_i) #with respective theta
+    
+    Jtu_i<-cbind(dphi_ee1,dphi_ee2,dphi_ee3)/n
+    
+    Jtu_mean<-Jtu_mean+Jtu_i
+    
+    ###E(ss)
+    ds_ee1_i<-(matrix(x_int[x,],ncol=1)%*%matrix(x_int[x,],nrow=1)*
+                 as.vector((1+exp(-x_int[x,]%*%beta_est))^(-1))*
+                 as.vector(1-(1+exp(-x_int[x,]%*%beta_est))^(-1)))/n
+    ds_ee1_mean<-ds_ee1_mean+ds_ee1_i
+  }
+  
+  ##calculate variance
+  ###Juu<-ds_ee1_mean
+  Juu<-matrix(0,nrow=ncol(x_int)+1+nrow(v_ext),
+              ncol=ncol(x_int)+1+nrow(v_ext))
+  Juu[1:ncol(x_int),1:ncol(x_int)]<-ds_ee1_mean
+  Juu[-c(1:(ncol(x_int)+1)),-c(1:(ncol(x_int)+1))]<-1/n*ginv(v_ext)
+  
+  V_asymptotic<-ginv(Juu-t(Jtu_mean)%*%ginv(Jtt_mean)%*%Jtu_mean)/n
+  
+  return(V_asymptotic=V_asymptotic)
+}
+
+
+##calculate asymptotic variance: general
+asymptotic_var_general<-function(beta_est=beta_est,gamma_est=gamma_est,
+                         theta_est=theta_est,v_ext=v_ext,
+                         y_int=y_int,x_int=x_int,used_index=used_index)
+{
+  n<-nrow(x_int)
+  ds_ee1_mean<-0
+  Jtt_mean<-0
+  Jtu_mean<-0
+  for(x in 1:n)
+  {
+    # s_ee_i<-matrix(x_int[x,],ncol=1)%*%(y_int[x]-(1+exp(-x_int[x,]%*%beta_est))^(-1))
+    # s_ee_i<-c(s_ee_i,0,rep(0,length(used_index)))
+    
+    p_i<-(1+exp(-x_int[x,]%*%beta_est))^(-1)
+    p_red_i<-(1+exp(-x_int[x,used_index]%*%theta_est))^(-1)
+    #estimating function
+    ee<-x_int[x,used_index]*c(1-p_red_i)*exp(gamma_est)*c(p_i)+
+      x_int[x,used_index]*c(0-p_red_i)*c(1-p_i)
+    phi_ee_i<-(ee)
+    
+    ###-E(gg)
+    Egg_i<--phi_ee_i%*%t(phi_ee_i)/n
+    Jtt_mean<-Jtt_mean+Egg_i
+    
+    #derivative of estimating function
+    dphi_ee1<-x_int[x,used_index]%*%t(x_int[x,])*c(1-p_red_i)*exp(gamma_est)*
+      c(p_i)*c(1-p_i)-
+      x_int[x,used_index]%*%t(x_int[x,])*c(0-p_red_i)*
+      c(p_i)*c(1-p_i) #with respect to beta
+    dphi_ee2<-x_int[x,used_index]*c(1-p_red_i)*exp(gamma_est)*c(p_i) #with respect to gamma
+    dphi_ee3<--x_int[x,used_index]%*%t(x_int[x,used_index])*exp(gamma_est)*
+      c(p_i)*c(p_red_i)*c(1-p_red_i)-
+      x_int[x,used_index]%*%t(x_int[x,used_index])*
+      c(1-p_i)*c(p_red_i)*c(1-p_red_i) #with respective theta
+    
+    Jtu_i<-cbind(dphi_ee1,dphi_ee2,dphi_ee3)/n
+    
+    Jtu_mean<-Jtu_mean+Jtu_i
+    
+    ###E(ss)
+    ds_ee1_i<-(matrix(x_int[x,],ncol=1)%*%matrix(x_int[x,],nrow=1)*
+                 as.vector((1+exp(-x_int[x,]%*%beta_est))^(-1))*
+                 as.vector(1-(1+exp(-x_int[x,]%*%beta_est))^(-1)))/n
+    ds_ee1_mean<-ds_ee1_mean+ds_ee1_i
+  }
+  
+  ##calculate variance
+  ###Juu<-ds_ee1_mean
+  Juu<-matrix(0,nrow=ncol(x_int)+1+nrow(v_ext),
+              ncol=ncol(x_int)+1+nrow(v_ext))
+  Juu[1:ncol(x_int),1:ncol(x_int)]<-ds_ee1_mean
+  Juu[-c(1:(ncol(x_int)+1)),-c(1:(ncol(x_int)+1))]<-1/n*ginv(v_ext)
+  
+  J_V<-matrix(0,nrow=ncol(x_int)+1+2*nrow(v_ext),
+              ncol=ncol(x_int)+1+2*nrow(v_ext))
+  J_V[1:nrow(v_ext),]<-cbind(Jtt_mean,Jtu_mean)
+  J_V[,1:nrow(v_ext)]<-t(cbind(Jtt_mean,Jtu_mean))
+  J_V[-(1:nrow(v_ext)),-(1:nrow(v_ext))]<-Juu
+  
+  I_V<-bdiag(-Jtt_mean,Juu) #the last block in I_V should be changed if only partial V is available
+  
+  V_asymptotic<-ginv(J_V)%*%I_V%*%ginv(J_V)/n
+  
+  return(V_asymptotic=V_asymptotic)
+}
+
+
+
+
+
+##use cmle with gamma
+information.borrowing_lcml<-function(beta_initial,gamma_initial,theta_ext,
+                                y_int,x_int,used_index)
+{
+  n<-nrow(x_int)
+  
+  #estimating function phi
+  ee_ib<-function(x_int,theta_ext,used_index,beta,gamma)
+  {
+    p_i<-(1+exp(-x_int%*%beta))^(-1)
+    p_red_i<-(1+exp(-x_int[,used_index]%*%theta_ext))^(-1)
+    #estimating function
+    ee<-x_int[,used_index]*c(1-p_red_i)*exp(gamma)*c(p_i)+
+      x_int[,used_index]*c(0-p_red_i)*c(1-p_i)
+    phi_ee<-t(ee)
+    #derivative of estimating function
+    dphi_ee<-lapply(1:n,function(x)
+    {
+      dphi_ee1<-x_int[x,used_index]%*%t(x_int[x,])*c(1-p_red_i[x])*exp(gamma)*
+        c(p_i[x])*c(1-p_i[x])-
+        x_int[x,used_index]%*%t(x_int[x,])*c(0-p_red_i[x])*
+        c(p_i[x])*c(1-p_i[x])
+      dphi_ee2<-x_int[x,used_index]*c(1-p_red_i[x])*exp(gamma)*c(p_i[x])
+      cbind(dphi_ee1,dphi_ee2)
+    }
+    )
+    dphi_ee<-do.call(cbind,dphi_ee)
+    return(cbind(phi_ee,dphi_ee))
+  }
+  
+  #lambda_find
+  lambda_find<-function(beta,gamma)
+  {
+    ZZ<-ee_ib(x_int,theta_ext,used_index,beta,gamma)[,1:(n)]
+    dim(ZZ)
+    apply(ZZ,1,mean)
+    
+    gamma_e<-1
+    c<-0
+    lambda<-rep(0,nrow(ZZ))
+    tol<-10e-7
+    Delta_old<-0
+    
+    repeat{
+      rl<-R1der(lambda,ZZ)
+      rll<-R2der(lambda,ZZ)
+      Delta<--ginv(rll)%*%rl
+      if(mean(abs(Delta))<tol | mean(Delta-Delta_old)==0 | c>100)
+      {break}else{
+        repeat{
+          mm<-0
+          repeat{
+            delta<-gamma_e*Delta
+            index_1<-apply(ZZ,2,function (xx)
+            {ifelse(1+t(lambda+delta)%*%as.matrix(xx,ncol=1)<=1/n,1,0)}
+            )
+            if (sum(index_1)>0)
+            {gamma_e<-gamma_e/2
+            mm<-mm+1}else{break}}
+          index_2<-ifelse(R0der(lambda+delta,ZZ)-R0der(lambda,ZZ)<0,1,0)
+          if (index_2==1)
+          {gamma_e<-gamma_e/2}else{break}
+        }
+        Delta_old<-Delta
+      }
+      lambda<-lambda+delta
+      c<-c+1
+      gamma_e<-(c)^(-0.5)
+    }
+    lambda
+  }
+  
+  ##first derivative of -log EL
+  R1der<-function(lambda,ZZ)
+  {
+    apply(ZZ,2,function(xx)
+    {as.matrix(xx,ncol=1)/as.vector((1+t(lambda)%*%as.matrix(xx,ncol=1)))})%*%rep(1,ncol(ZZ))
+  }
+  
+  #second derivative of -log EL
+  R2der<-function(lambda,ZZ)
+  {
+    r2der<-0
+    for(i in 1:ncol(ZZ))
+    {
+      r2der_i<--as.matrix(ZZ[,i],ncol=1)%*%t(as.matrix(ZZ[,i],ncol=1))/as.vector(1+t(lambda)%*%as.matrix(ZZ[,i],ncol=1))^2
+      r2der<-r2der+r2der_i
+    }
+    r2der
+  }
+  
+  #-log EL
+  R0der<-function(lambda,ZZ)
+  {
+    apply(ZZ,2, function (xx) {log(as.vector(1+t(lambda)%*%as.matrix(xx,ncol=1)))})%*%rep(1,ncol(ZZ))
+  }
+  
+  #estimate beta finally
+  beta_ee<-function(beta,gamma)
+  {
+    
+    #parameter_all<-c(beta,gamma)
+    
+    lambda<-lambda_find(beta,gamma)
+    
+    
+    M_lh<-function(beta,gamma){
+      m_sum<-0
+      lambda<-lambda_find(beta,gamma)
+      total<-ee_ib(x_int=x_int,theta_ext=theta_ext,used_index=used_index,beta=beta,gamma=gamma)
+      ZZ<-total[,1:(n)]
+      
+      #try 
+      L<-0
+      f<-0
+      for (i in 1:n)
+      {
+        L_i<--log(1+t(matrix(lambda,ncol=1))%*%ZZ[,i])
+        f_i<-y_int[i]*log((1+exp(-x_int[i,]%*%beta))^(-1))+(1-y_int[i])*log(1-(1+exp(-x_int[i,]%*%beta))^(-1))
+        m_sum<-m_sum+L_i+f_i
+        
+        #try
+        L<-L+L_i
+        f<-f+f_i
+      }
+      m_sum
+    }
+    
+    l<-1
+    repeat
+    {
+      total<-ee_ib(x_int=x_int,theta_ext=theta_ext,used_index=used_index,beta=beta,gamma=gamma)
+      
+      #total<-g_fct(beta=beta,beta_external=beta_external,y_main=y_main,x_main=x_main, cali.matrix=cali.matrix, ind.ex=ind.ex,cal.score=cal.score)
+      
+      #total<-g_fct(beta=beta,beta_external=beta_external,y_main=y_main,x_main=x_main)
+      #total<-wgeef(beta=beta,adata,r=r,id=id,dist=dist,time=time,n=n)
+      ZZ<-total[,1:(n)]
+      ZZ_d<-total[,(n+1):((ncol(x_int)+1+1)*(n-1)+ncol(x_int)+1+1)]
+      tau<-1
+      s_ee_sum<-0
+      ds_ee_sum<-0
+      for1_sum<-0
+      for2_sum<-0
+      for3_sum<-0
+      for (i in 1:(n))
+      {
+        scaler<-(1/(1+t(matrix(lambda,ncol=1))%*%ZZ[,i]))
+        
+        s_ee_i<-matrix(x_int[i,],ncol=1)%*%(y_int[i]-(1+exp(-x_int[i,]%*%beta))^(-1))
+        s_ee_i<-c(s_ee_i,0)
+        
+        ds_ee_i<--(matrix(x_int[i,],ncol=1)%*%matrix(x_int[i,],nrow=1)*
+                     as.vector((1+exp(-x_int[i,]%*%beta))^(-1))*as.vector(1-(1+exp(-x_int[i,]%*%beta))^(-1)))
+        ds_ee_i<-rbind(cbind(ds_ee_i,0),0)
+        
+        for1_i<-matrix(t(ZZ_d[,((i-1)*(ncol(x_int)+1)+1):(i*(ncol(x_int)+1))]),
+                       nrow=ncol(x_int)+1)*as.vector(scaler)
+        for2_i<-ZZ[,i]%*%t(ZZ[,i])*as.vector(scaler^2)
+        for3_i<-t(for1_i)
+        
+        s_ee_sum<-s_ee_sum+s_ee_i
+        ds_ee_sum<-ds_ee_sum+ds_ee_i
+        for1_sum<-for1_sum+for1_i
+        for2_sum<-for2_sum+for2_i
+        for3_sum<-for3_sum+for3_i
+        
+      }
+      M_b<-s_ee_sum-for1_sum%*%matrix(lambda,ncol=1)
+      m_bb<-ds_ee_sum-for1_sum%*%ginv(for2_sum)%*%for3_sum #it has been checked, should be negative sign!  #recheck this!!!!
+      delta<-ginv(m_bb)%*%M_b
+      beta_update<-beta-tau*delta[1:ncol(x_int)]
+      
+      ##keep gamma small
+      gamma_update<-gamma-tau*delta[-c(1:ncol(x_int))]
+      ll<-1
+      repeat{
+        if(abs(gamma_update)<2)
+        {break}else{
+          ll<-ll+1
+          gamma_update<-gamma-tau/ll*delta[-c(1:ncol(x_int))]
+          beta_update<-beta-tau/ll*delta[1:ncol(x_int)]
+        }
+      }
+      
+      
+      
+      jj<-1
+      repeat{
+        criterion_update<-M_lh(beta_update,gamma_update)
+        criterion_old<-M_lh(beta,gamma)
+        
+        if(!is.na(criterion_update) & !is.na(criterion_old) & criterion_update >criterion_old | jj>6)
+        {
+          break
+        }else{
+          tau<-tau/2
+          beta_update<-beta-tau*delta[1:ncol(x_int)]
+          ##keep gamma small
+          gamma_update<-gamma-tau*delta[-c(1:ncol(x_int))]
+          ll<-1
+          repeat{
+            if(abs(gamma_update)<2){break}else{
+              ll<-ll+1
+              gamma_update<-gamma-tau/ll*delta[-c(1:ncol(x_int))]
+              beta_update<-beta-tau/ll*delta[1:ncol(x_int)]
+            }
+          }
+          jj<-jj+1
+        }
+      }
+      
+      if(mean(abs(beta_update-beta))<1e-4 | l>30)
+      {break}else{
+        beta<-beta_update
+        gamma<-gamma_update
+        lambda<-lambda_find(beta,gamma)
+        l<-l+1
+      }
+      
+    }
+    return(list(beta_final=beta_update,gamma_final=gamma_update,l=l,lambda=lambda))
+  }
+  
+  final_results<-beta_ee(beta_initial,gamma_initial)
+  lambda_final<-final_results$lambda
+  beta_est<-final_results$beta_final
+  gamma_est<-final_results$gamma_final
+  list(beta_est=beta_est,
+       gamma_est=gamma_est,
+       lambda=lambda_final)
+}
+
+
+##use cml without gamma
+information.borrowing_cml<-function(beta_initial,theta_ext,
+                                     y_int,x_int,used_index)
+{
+  n<-nrow(x_int)
+  
+  #estimating function phi
+  ee_ib<-function(x_int,theta_ext,used_index,beta)
+  {
+    p_i<-(1+exp(-x_int%*%beta))^(-1)
+    p_red_i<-(1+exp(-x_int[,used_index]%*%theta_ext))^(-1)
+    #estimating function
+    ee<-x_int[,used_index]*c(1-p_red_i)*c(p_i)+
+      x_int[,used_index]*c(0-p_red_i)*c(1-p_i)
+    phi_ee<-t(ee)
+    #derivative of estimating function
+    dphi_ee<-lapply(1:n,function(x)
+    {
+      dphi_ee1<-x_int[x,used_index]%*%t(x_int[x,])*c(1-p_red_i[x])*
+        c(p_i[x])*c(1-p_i[x])-
+        x_int[x,used_index]%*%t(x_int[x,])*c(0-p_red_i[x])*
+        c(p_i[x])*c(1-p_i[x])
+      # dphi_ee2<-x_int[x,used_index]*c(1-p_red_i[x])*c(p_i[x])
+      #cbind(dphi_ee1,dphi_ee2)
+      dphi_ee1
+    }
+    )
+    dphi_ee<-do.call(cbind,dphi_ee)
+    return(cbind(phi_ee,dphi_ee))
+  }
+  
+  #lambda_find
+  lambda_find<-function(beta)
+  {
+    ZZ<-ee_ib(x_int,theta_ext,used_index,beta)[,1:(n)]
+    dim(ZZ)
+    apply(ZZ,1,mean)
+    
+    gamma_e<-1
+    c<-0
+    lambda<-rep(0,nrow(ZZ))
+    tol<-10e-7
+    Delta_old<-0
+    
+    repeat{
+      rl<-R1der(lambda,ZZ)
+      rll<-R2der(lambda,ZZ)
+      Delta<--ginv(rll)%*%rl
+      if(mean(abs(Delta))<tol | mean(Delta-Delta_old)==0 | c>100)
+      {break}else{
+        repeat{
+          mm<-0
+          repeat{
+            delta<-gamma_e*Delta
+            index_1<-apply(ZZ,2,function (xx)
+            {ifelse(1+t(lambda+delta)%*%as.matrix(xx,ncol=1)<=1/n,1,0)}
+            )
+            if (sum(index_1)>0)
+            {gamma_e<-gamma_e/2
+            mm<-mm+1}else{break}}
+          index_2<-ifelse(R0der(lambda+delta,ZZ)-R0der(lambda,ZZ)<0,1,0)
+          if (index_2==1)
+          {gamma_e<-gamma_e/2}else{break}
+        }
+        Delta_old<-Delta
+      }
+      lambda<-lambda+delta
+      c<-c+1
+      gamma_e<-(c)^(-0.5)
+    }
+    lambda
+  }
+  
+  ##first derivative of -log EL
+  R1der<-function(lambda,ZZ)
+  {
+    apply(ZZ,2,function(xx)
+    {as.matrix(xx,ncol=1)/as.vector((1+t(lambda)%*%as.matrix(xx,ncol=1)))})%*%rep(1,ncol(ZZ))
+  }
+  
+  #second derivative of -log EL
+  R2der<-function(lambda,ZZ)
+  {
+    r2der<-0
+    for(i in 1:ncol(ZZ))
+    {
+      r2der_i<--as.matrix(ZZ[,i],ncol=1)%*%t(as.matrix(ZZ[,i],ncol=1))/as.vector(1+t(lambda)%*%as.matrix(ZZ[,i],ncol=1))^2
+      r2der<-r2der+r2der_i
+    }
+    r2der
+  }
+  
+  #-log EL
+  R0der<-function(lambda,ZZ)
+  {
+    apply(ZZ,2, function (xx) {log(as.vector(1+t(lambda)%*%as.matrix(xx,ncol=1)))})%*%rep(1,ncol(ZZ))
+  }
+  
+  #estimate beta finally
+  beta_ee<-function(beta)
+  {
+    
+    #parameter_all<-c(beta,gamma)
+    
+    lambda<-lambda_find(beta)
+    
+    
+    M_lh<-function(beta){
+      m_sum<-0
+      lambda<-lambda_find(beta)
+      total<-ee_ib(x_int=x_int,theta_ext=theta_ext,used_index=used_index,beta=beta)
+      ZZ<-total[,1:(n)]
+      
+      #try 
+      L<-0
+      f<-0
+      for (i in 1:n)
+      {
+        L_i<--log(1+t(matrix(lambda,ncol=1))%*%ZZ[,i])
+        f_i<-y_int[i]*log((1+exp(-x_int[i,]%*%beta))^(-1))+(1-y_int[i])*log(1-(1+exp(-x_int[i,]%*%beta))^(-1))
+        m_sum<-m_sum+L_i+f_i
+        
+        #try
+        L<-L+L_i
+        f<-f+f_i
+      }
+      m_sum
+    }
+    
+    l<-1
+    repeat
+    {
+      total<-ee_ib(x_int=x_int,theta_ext=theta_ext,used_index=used_index,beta=beta)
+      
+      #total<-g_fct(beta=beta,beta_external=beta_external,y_main=y_main,x_main=x_main, cali.matrix=cali.matrix, ind.ex=ind.ex,cal.score=cal.score)
+      
+      #total<-g_fct(beta=beta,beta_external=beta_external,y_main=y_main,x_main=x_main)
+      #total<-wgeef(beta=beta,adata,r=r,id=id,dist=dist,time=time,n=n)
+      ZZ<-total[,1:(n)]
+      ZZ_d<-total[,(n+1):((ncol(x_int)+1)*(n-1)+ncol(x_int)+1)]
+      tau<-1
+      s_ee_sum<-0
+      ds_ee_sum<-0
+      for1_sum<-0
+      for2_sum<-0
+      for3_sum<-0
+      for (i in 1:(n))
+      {
+        scaler<-(1/(1+t(matrix(lambda,ncol=1))%*%ZZ[,i]))
+        
+        s_ee_i<-matrix(x_int[i,],ncol=1)%*%(y_int[i]-(1+exp(-x_int[i,]%*%beta))^(-1))
+        #s_ee_i<-c(s_ee_i)
+        
+        ds_ee_i<--(matrix(x_int[i,],ncol=1)%*%matrix(x_int[i,],nrow=1)*
+                     as.vector((1+exp(-x_int[i,]%*%beta))^(-1))*as.vector(1-(1+exp(-x_int[i,]%*%beta))^(-1)))
+        #ds_ee_i<-rbind(cbind(ds_ee_i))
+        
+        for1_i<-matrix(t(ZZ_d[,((i-1)*(ncol(x_int))+1):(i*(ncol(x_int)))]),
+                       nrow=ncol(x_int))*as.vector(scaler)
+        for2_i<-ZZ[,i]%*%t(ZZ[,i])*as.vector(scaler^2)
+        for3_i<-t(for1_i)
+        
+        s_ee_sum<-s_ee_sum+s_ee_i
+        ds_ee_sum<-ds_ee_sum+ds_ee_i
+        for1_sum<-for1_sum+for1_i
+        for2_sum<-for2_sum+for2_i
+        for3_sum<-for3_sum+for3_i
+        
+      }
+      M_b<-s_ee_sum-for1_sum%*%matrix(lambda,ncol=1)
+      m_bb<-ds_ee_sum-for1_sum%*%ginv(for2_sum)%*%for3_sum #it has been checked, should be negative sign!  #recheck this!!!!
+      delta<-ginv(m_bb)%*%M_b
+      beta_update<-beta-tau*delta[1:ncol(x_int)]
+      
+      
+      
+      
+      jj<-1
+      repeat{
+        criterion_update<-M_lh(beta_update)
+        criterion_old<-M_lh(beta)
+        
+        if(!is.na(criterion_update) & !is.na(criterion_old) & criterion_update >criterion_old | jj>6)
+        {
+          break
+        }else{
+          tau<-tau/2
+          beta_update<-beta-tau*delta[1:ncol(x_int)]
+          jj<-jj+1
+        }
+      }
+      
+      if(mean(abs(beta_update-beta))<1e-4 | l>30)
+      {break}else{
+        beta<-beta_update
+        lambda<-lambda_find(beta)
+        l<-l+1
+      }
+      
+    }
+    return(list(beta_final=beta_update,l=l,lambda=lambda))
+  }
+  
+  final_results<-beta_ee(beta_initial)
+  lambda_final<-final_results$lambda
+  beta_est<-final_results$beta_final
+  list(beta_est=beta_est,
+       lambda=lambda_final)
+}
+
+
+##use gim without gamma
+information.borrowing_gim<-function(beta_initial,
+                                     theta_ext_ini,theta_ext_est,v_ext,
+                                     y_int,x_int,used_index)
+{
+  n<-nrow(x_int)
+  
+  #estimating function phi
+  ee_ib<-function(x_int,theta_ext,used_index,beta)
+  {
+    p_i<-(1+exp(-x_int%*%beta))^(-1)
+    p_red_i<-(1+exp(-x_int[,used_index]%*%theta_ext))^(-1)
+    #estimating function
+    ee<-x_int[,used_index]*c(1-p_red_i)*c(p_i)+
+      x_int[,used_index]*c(0-p_red_i)*c(1-p_i)
+    phi_ee<-t(ee)
+    #derivative of estimating function
+    dphi_ee<-lapply(1:n,function(x)
+    {
+      dphi_ee1<-x_int[x,used_index]%*%t(x_int[x,])*c(1-p_red_i[x])*
+        c(p_i[x])*c(1-p_i[x])-
+        x_int[x,used_index]%*%t(x_int[x,])*c(0-p_red_i[x])*
+        c(p_i[x])*c(1-p_i[x]) #derivative with respect to beta
+      #dphi_ee2<-x_int[x,used_index]*c(1-p_red_i[x])*exp(gamma)*c(p_i[x]) #derivative with respect to gamma
+      dphi_ee3<--x_int[x,used_index]%*%t(x_int[x,used_index])*
+        c(p_i[x])*c(p_red_i[x])*c(1-p_red_i[x])-
+        x_int[x,used_index]%*%t(x_int[x,used_index])*
+        c(1-p_i[x])*c(p_red_i[x])*c(1-p_red_i[x]) #derivative with respect to theta
+      
+      cbind(dphi_ee1,dphi_ee3)
+    }
+    )
+    dphi_ee<-do.call(cbind,dphi_ee)
+    return(cbind(phi_ee,dphi_ee))
+  }
+  
+  #lambda_find
+  lambda_find<-function(beta,theta_ext)
+  {
+    ZZ<-ee_ib(x_int,theta_ext,used_index,beta)[,1:(n)]
+    dim(ZZ)
+    apply(ZZ,1,mean)
+    
+    gamma_e<-1
+    c<-0
+    lambda<-rep(0,nrow(ZZ))
+    tol<-10e-7
+    Delta_old<-0
+    
+    repeat{
+      rl<-R1der(lambda,ZZ)
+      rll<-R2der(lambda,ZZ)
+      Delta<--ginv(rll)%*%rl
+      if(mean(abs(Delta))<tol | mean(Delta-Delta_old)==0 | c>100)
+      {break}else{
+        repeat{
+          mm<-0
+          repeat{
+            delta<-gamma_e*Delta
+            index_1<-apply(ZZ,2,function (xx)
+            {ifelse(1+t(lambda+delta)%*%as.matrix(xx,ncol=1)<=1/n,1,0)}
+            )
+            if (sum(index_1)>0)
+            {gamma_e<-gamma_e/2
+            mm<-mm+1}else{break}}
+          index_2<-ifelse(R0der(lambda+delta,ZZ)-R0der(lambda,ZZ)<0,1,0)
+          if (index_2==1)
+          {gamma_e<-gamma_e/2}else{break}
+        }
+        Delta_old<-Delta
+      }
+      lambda<-lambda+delta
+      c<-c+1
+      gamma_e<-(c)^(-0.5)
+    }
+    lambda
+  }
+  
+  ##first derivative of -log EL
+  R1der<-function(lambda,ZZ)
+  {
+    apply(ZZ,2,function(xx)
+    {as.matrix(xx,ncol=1)/as.vector((1+t(lambda)%*%as.matrix(xx,ncol=1)))})%*%rep(1,ncol(ZZ))
+  }
+  
+  #second derivative of -log EL
+  R2der<-function(lambda,ZZ)
+  {
+    r2der<-0
+    for(i in 1:ncol(ZZ))
+    {
+      r2der_i<--as.matrix(ZZ[,i],ncol=1)%*%t(as.matrix(ZZ[,i],ncol=1))/as.vector(1+t(lambda)%*%as.matrix(ZZ[,i],ncol=1))^2
+      r2der<-r2der+r2der_i
+    }
+    r2der
+  }
+  
+  #-log EL
+  R0der<-function(lambda,ZZ)
+  {
+    apply(ZZ,2, function (xx) {log(as.vector(1+t(lambda)%*%as.matrix(xx,ncol=1)))})%*%rep(1,ncol(ZZ))
+  }
+  
+  #estimate beta finally
+  beta_ee<-function(beta,theta_ext,theta_ext_est,v_ext,used_index,x_int)
+  {
+    
+    #parameter_all<-c(beta,gamma)
+    
+    lambda<-lambda_find(beta,theta_ext)
+    
+    
+    M_lh<-function(beta,theta_ext){
+      m_sum<-0
+      lambda<-lambda_find(beta,theta_ext)
+      total<-ee_ib(x_int=x_int,theta_ext=theta_ext,
+                   used_index=used_index,beta=beta)
+      ZZ<-total[,1:(n)]
+      
+      #try 
+      L<-0
+      f<-0
+      for (i in 1:n)
+      {
+        L_i<--log(1+t(matrix(lambda,ncol=1))%*%ZZ[,i])
+        f_i<-y_int[i]*log((1+exp(-x_int[i,]%*%beta))^(-1))+(1-y_int[i])*log(1-(1+exp(-x_int[i,]%*%beta))^(-1))
+        m_sum<-m_sum+L_i+f_i
+        
+        #try
+        L<-L+L_i
+        f<-f+f_i
+      }
+      m_sum-t(theta_ext-theta_ext_est)%*%ginv(v_ext)%*%(theta_ext-theta_ext_est)/2
+    }
+    
+
+    
+    l<-1
+    repeat
+    {
+      total<-ee_ib(x_int=x_int,theta_ext=theta_ext,
+                   used_index=used_index,beta=beta)
+      
+      #total<-g_fct(beta=beta,beta_external=beta_external,y_main=y_main,x_main=x_main, cali.matrix=cali.matrix, ind.ex=ind.ex,cal.score=cal.score)
+      
+      #total<-g_fct(beta=beta,beta_external=beta_external,y_main=y_main,x_main=x_main)
+      #total<-wgeef(beta=beta,adata,r=r,id=id,dist=dist,time=time,n=n)
+      ZZ<-total[,1:(n)]
+      ZZ_d<-total[,(n+1):((ncol(x_int)+length(used_index)+1)*(n-1)+ncol(x_int)+length(used_index)+1)]
+      tau<-1
+      s_ee_sum<-0
+      ds_ee_sum<-0
+      for1_sum<-0
+      for2_sum<-0
+      for3_sum<-0
+      for (i in 1:(n))
+      {
+        scaler<-(1/(1+t(matrix(lambda,ncol=1))%*%ZZ[,i]))
+        
+        s_ee_i<-matrix(x_int[i,],ncol=1)%*%(y_int[i]-(1+exp(-x_int[i,]%*%beta))^(-1))
+        s_ee_i<-c(s_ee_i,rep(0,length(used_index)))
+        
+        ds_ee1_i<--(matrix(x_int[i,],ncol=1)%*%matrix(x_int[i,],nrow=1)*
+                      as.vector((1+exp(-x_int[i,]%*%beta))^(-1))*
+                      as.vector(1-(1+exp(-x_int[i,]%*%beta))^(-1)))
+        ds_ee1_i<-cbind(ds_ee1_i,matrix(0,nrow=nrow(ds_ee1_i),
+                                          ncol=length(used_index)))
+        ds_ee_i<-rbind(ds_ee1_i,
+                       matrix(0,nrow=length(used_index),ncol=ncol(ds_ee1_i)))
+        
+        for1_i<-matrix(t(ZZ_d[,((i-1)*(ncol(x_int)+length(used_index))+1):
+                                (i*(ncol(x_int)+length(used_index)))]),
+                       nrow=ncol(x_int)+length(used_index))*as.vector(scaler)
+        for2_i<-ZZ[,i]%*%t(ZZ[,i])*as.vector(scaler^2)
+        for3_i<-t(for1_i)
+        
+        s_ee_sum<-s_ee_sum+s_ee_i
+        ds_ee_sum<-ds_ee_sum+ds_ee_i
+        for1_sum<-for1_sum+for1_i
+        for2_sum<-for2_sum+for2_i
+        for3_sum<-for3_sum+for3_i
+        
+      }
+      M_b<-s_ee_sum-for1_sum%*%matrix(lambda,ncol=1)-c(rep(0,ncol(x_int)),ginv(v_ext)%*%(theta_ext-theta_ext_est))
+      adjust_2ed<-diag(0,ncol(x_int)+length(used_index))
+      adjust_2ed[-c(1:(ncol(x_int))),-c(1:(ncol(x_int)))]<-ginv(v_ext)
+      m_bb<-ds_ee_sum-for1_sum%*%ginv(for2_sum)%*%for3_sum-adjust_2ed #it has been checked, should be negative sign!  #recheck the last term, positive or negative
+      delta<-ginv(m_bb)%*%M_b
+      beta_update<-beta-tau*delta[1:ncol(x_int)]
+      theta_ext_update<-theta_ext-tau*delta[-c(1:(ncol(x_int)))]
+      
+      ##keep gamma small
+      # gamma_update<-gamma-tau*delta[ncol(x_int)+1]
+      # ll<-1
+      # repeat{
+      #   if(abs(gamma_update)<2)
+      #   {break}else{
+      #     ll<-ll+1
+      #     gamma_update<-gamma-tau/ll*delta[ncol(x_int)+1]
+      #     beta_update<-beta-tau/ll*delta[1:ncol(x_int)]
+      #     theta_ext_update<-theta_ext-tau/ll*delta[-c(1:(ncol(x_int)+1))]
+      #     
+      #   }
+      # }
+      
+      
+      
+      jj<-1
+      repeat{
+        criterion_update<-M_lh(beta_update,theta_ext_update)
+        criterion_old<-M_lh(beta,theta_ext)
+        
+        if(!is.na(criterion_update) & !is.na(criterion_old) & criterion_update >criterion_old | jj>6)
+        {
+          break
+        }else{
+          tau<-tau/2
+          beta_update<-beta-tau*delta[1:ncol(x_int)]
+          ##keep gamma small
+          #gamma_update<-gamma-tau*delta[ncol(x_int)+1]
+          theta_ext_update<-theta_ext-tau*delta[-c(1:(ncol(x_int)))]
+          
+          # ll<-1
+          # repeat{
+          #   if(abs(gamma_update)<2){break}else{
+          #     ll<-ll+1
+          #     gamma_update<-gamma-tau/ll*delta[ncol(x_int)+1]
+          #     beta_update<-beta-tau/ll*delta[1:ncol(x_int)]
+          #     theta_ext_update<-theta_ext-tau/ll*delta[-c(1:(ncol(x_int)+1))]
+          #     
+          #   }
+          # }
+          jj<-jj+1
+        }
+      }
+      
+      if(mean(abs(beta_update-beta))<1e-4 | l>30)
+      {break}else{
+        beta<-beta_update
+        #gamma<-gamma_update
+        theta_ext<-theta_ext_update
+        lambda<-lambda_find(beta,theta_ext)
+        l<-l+1
+      }
+      
+    }
+    return(list(beta_final=beta_update,theta_final=theta_ext_update,l=l,lambda=lambda))
+  }
+  
+  final_results<-beta_ee(beta_initial,theta_ext_ini,
+                         theta_ext_est,v_ext,used_index,x_int)
+  lambda_final<-final_results$lambda
+  beta_est<-final_results$beta_final
+  #gamma_est<-final_results$gamma_final
+  theta_est<-final_results$theta_final
+  list(beta_est=beta_est,
+       #gamma_est=gamma_est,
+       theta_est=theta_est,
+       lambda=lambda_final)
+}
+
+
+##calculate asymptotic variance: general
+asymptotic_var_general_gim<-function(beta_est=beta_est,
+                                 theta_est=theta_est,v_ext=v_ext,
+                                 y_int=y_int,x_int=x_int,used_index=used_index)
+{
+  n<-nrow(x_int)
+  ds_ee1_mean<-0
+  Jtt_mean<-0
+  Jtu_mean<-0
+  for(x in 1:n)
+  {
+    # s_ee_i<-matrix(x_int[x,],ncol=1)%*%(y_int[x]-(1+exp(-x_int[x,]%*%beta_est))^(-1))
+    # s_ee_i<-c(s_ee_i,0,rep(0,length(used_index)))
+    
+    p_i<-(1+exp(-x_int[x,]%*%beta_est))^(-1)
+    p_red_i<-(1+exp(-x_int[x,used_index]%*%theta_est))^(-1)
+    #estimating function
+    ee<-x_int[x,used_index]*c(1-p_red_i)*c(p_i)+
+      x_int[x,used_index]*c(0-p_red_i)*c(1-p_i)
+    phi_ee_i<-(ee)
+    
+    ###-E(gg)
+    Egg_i<--phi_ee_i%*%t(phi_ee_i)/n
+    Jtt_mean<-Jtt_mean+Egg_i
+    
+    #derivative of estimating function
+    dphi_ee1<-x_int[x,used_index]%*%t(x_int[x,])*c(1-p_red_i)*
+      c(p_i)*c(1-p_i)-
+      x_int[x,used_index]%*%t(x_int[x,])*c(0-p_red_i)*
+      c(p_i)*c(1-p_i) #with respect to beta
+    #dphi_ee2<-x_int[x,used_index]*c(1-p_red_i)*c(p_i) #with respect to gamma
+    dphi_ee3<--x_int[x,used_index]%*%t(x_int[x,used_index])*
+      c(p_i)*c(p_red_i)*c(1-p_red_i)-
+      x_int[x,used_index]%*%t(x_int[x,used_index])*
+      c(1-p_i)*c(p_red_i)*c(1-p_red_i) #with respective theta
+    
+    Jtu_i<-cbind(dphi_ee1,dphi_ee3)/n
+    
+    Jtu_mean<-Jtu_mean+Jtu_i
+    
+    ###E(ss)
+    ds_ee1_i<-(matrix(x_int[x,],ncol=1)%*%matrix(x_int[x,],nrow=1)*
+                 as.vector((1+exp(-x_int[x,]%*%beta_est))^(-1))*
+                 as.vector(1-(1+exp(-x_int[x,]%*%beta_est))^(-1)))/n
+    ds_ee1_mean<-ds_ee1_mean+ds_ee1_i
+  }
+  
+  ##calculate variance
+  ###Juu<-ds_ee1_mean
+  Juu<-matrix(0,nrow=ncol(x_int)+nrow(v_ext),
+              ncol=ncol(x_int)+nrow(v_ext))
+  Juu[1:ncol(x_int),1:ncol(x_int)]<-ds_ee1_mean
+  Juu[-c(1:(ncol(x_int))),-c(1:(ncol(x_int)))]<-1/n*ginv(v_ext)
+  
+  J_V<-matrix(0,nrow=ncol(x_int)+2*nrow(v_ext),
+              ncol=ncol(x_int)+2*nrow(v_ext))
+  J_V[1:nrow(v_ext),]<-cbind(Jtt_mean,Jtu_mean)
+  J_V[,1:nrow(v_ext)]<-t(cbind(Jtt_mean,Jtu_mean))
+  J_V[-(1:nrow(v_ext)),-(1:nrow(v_ext))]<-Juu
+  
+  I_V<-bdiag(-Jtt_mean,Juu) #the last block in I_V should be changed if only partial V is available
+  
+  V_asymptotic<-ginv(J_V)%*%I_V%*%ginv(J_V)/n
+  
+  return(V_asymptotic=V_asymptotic)
+}
+
+
+#basic setup
+ratio<-3
+n<-1000
+N<-100000
+n_ext<-n*ratio
+num.iter<-20
+num.cov<-4
+betaT<-rep(0.5,num.cov+3)
+gammaT<-0.5
+used_index<-c(1:5)
+sigma.cov<-diag(0.3,num.cov)
+sigma.cov[,]<-0.3
+diag(sigma.cov)<-1
+
+
+beta_mle_all<-rep()
+beta_p<-rep()
+gamma_p<-rep()
+theta_p<-rep()
+
+beta_v<-rep()
+gamma_v<-rep()
+theta_v<-rep()
+
+beta_v_gim<-rep()
+
+beta_cp<-rep()
+gamma_cp<-rep()
+
+beta_p_cml<-rep()
+beta_p_gim<-rep()
+beta_p_lcml<-rep()
+gamma_p_lcml<-rep()
+
+
+for (iter in 1:num.iter)
+{
+  #generalte external data
+  ##do rejection sampling
+  num.big<-round(N/(1/exp(0.5)))
+  z1_all<-rbinom(num.big,1,0.5)
+  z2_all<-runif(num.big,0,1)
+  x_raw_all<-rmvnorm(num.big,rep(0,num.cov),sigma.cov)
+  x1_all<-x_raw_all[,1]+z1_all
+  x2_all<-x_raw_all[,2]+z2_all
+  x3_all<-x_raw_all[,3]
+  x4_all<-x_raw_all[,4]
+  x_all<-cbind(1,x1_all,x2_all,x3_all,x4_all,z1_all,z2_all)
+  mu_all<-(1+exp(-x_all%*%betaT))^(-1)
+  y_all<-rbinom(num.big,1,mu_all)
+  
+  ##check
+  eva<-runif(num.big,0,1)
+  use_index<-ifelse(eva<(exp(gammaT*y_all)/(0.745861*exp(gammaT)+(1-0.745861)))/
+                      (1.1*exp(gammaT)),1,0)
+  table(use_index)
+  
+  ##make external data
+  ext_used<-sample(1:sum(use_index),n_ext)
+  y_ext<-y_all[use_index==1][ext_used]
+  x_ext<-x_all[use_index==1,][ext_used,]
+  dim(x_ext)
+  
+  ##calculate theta
+  fit<-glm(y_ext~x_ext[,used_index]-1,family = binomial(link = "logit"))
+  theta_ext<-c(fit$coefficients)
+  ###estimate theta variance
+  sandwith_self<-function(y_ext,x_ext,theta_ext,used_index)
+  {
+    n<-length(y_ext)
+    ee_all<-0
+    dee_all<-0
+    for(i in 1:n)
+    {
+      mu_i<-(1+exp(-x_ext[i,used_index]%*%theta_ext))^(-1)
+      ee_i<-c(x_ext[i,used_index])*c(y_ext[i]-mu_i)
+      dee_i<--c(x_ext[i,used_index])%*%t(x_ext[i,used_index])*c(mu_i)*c(1-mu_i)
+      
+      ee_all<-ee_all+ee_i%*%t(ee_i)/n
+      dee_all<-dee_all+dee_i/n
+    }
+    ginv(dee_all)%*%ee_all%*%ginv(dee_all)/n
+  }
+  v_ext<-sandwith_self(y_ext,x_ext,theta_ext,used_index)
+  #diag(v_ext)<-0
+  #v_ext<-vcovHC(fit)
+  # v_ext<-summary(fit)
+  # v_ext<-v_ext$cov.unscaled
+  # 
+  
+  
+  
+  #generate internal data
+  ##generate x
+  z1_int<-rbinom(n,1,0.5)
+  z2_int<-runif(n,0,1)
+  x_raw_int<-rmvnorm(n,rep(0,num.cov),sigma.cov)
+  x1_int<-x_raw_int[,1]+z1_int
+  x2_int<-x_raw_int[,2]+z2_int
+  x3_int<-x_raw_int[,3]
+  x4_int<-x_raw_int[,4]
+  x_int<-cbind(1,x1_int,x2_int,x3_int,x4_int,z1_int,z2_int)
+  mu_int<-(1+exp(-x_int%*%betaT))^(-1)
+  y_int<-rbinom(n,1,mu_int)
+  
+  prop.table(table(y_int))
+  prop.table(table(y_ext))
+  
+  theta_ext_est<-theta_ext_ini<-theta_ext
+  
+  # #calculate gamma based on internal data
+  # ee_gamma<-function(gamma)
+  # {
+  #   n<-nrow(x_int)
+  #   p_i<-(1+exp(-x_int%*%betaT))^(-1)
+  #   p_red_i<-(1+exp(-x_int[,used_index]%*%theta_ext))^(-1)
+  #   ee1<-x_int[,used_index]*c(1-p_red_i)*c(p_i)*exp(gamma)
+  #   ee<-ee1+
+  #     x_int[,used_index]*c(0-p_red_i)*c(1-p_i)
+  #   t(apply(t(ee1),1,mean))%*%apply(t(ee),1,mean)
+  # }
+  # 
+  # multiroot(ee_gamma,start=0)
+  
+  #now calculate beta
+  ##calculate beta mle
+  fit<-glm(y_int~x_int-1,family = binomial(link = "logit"))
+  beta_mle<-c(fit$coefficients)
+  
+  #calculate gamma_initial based on internal data
+  ee_gamma_ini<-function(gamma)
+  {
+    n<-nrow(x_int)
+    #p_i<-(1+exp(-x_int%*%betaT))^(-1)
+    p_red_i<-(1+exp(-x_int[,used_index]%*%theta_ext))^(-1)
+    ee<-x_int[,used_index]*c(y_int-p_red_i)*exp(gamma*y_int)
+    dee<-ee*y_int
+    t(apply(t(dee),1,mean))%*%apply(t(ee),1,mean)
+  }
+  
+  gamma_initial<-multiroot(ee_gamma_ini,start=0)$root
+  if(abs(gamma_initial)>1|is.na(gamma_initial)){gamma_initial=0}
+  
+  
+  #calculate beta_initial
+  ee_ib_beta_ini<-function(gamma_initial)
+  {
+    n<-nrow(x_int)
+    #p_i<-(1+exp(-x_int%*%betaT))^(-1)
+    p_red_i<-(1+exp(-x_int[,used_index]%*%theta_ext))^(-1)
+    ee<-x_int[,used_index]*c(y_int-p_red_i)*exp(gamma_initial*y_int)
+    t(ee)
+  }
+  
+  #lambda_find
+  lambda_find_beta_ini<-function(gamma_initial=gamma_initial)
+  {
+    ZZ<-  ee_ib_beta_ini(gamma_initial)
+    dim(ZZ)
+    apply(ZZ,1,mean)
+    
+    gamma_e<-1
+    c<-0
+    lambda<-rep(0,nrow(ZZ))
+    tol<-10e-8
+    Delta_old<-0
+    
+    repeat{
+      rl<-R1der(lambda,ZZ)
+      rll<-R2der(lambda,ZZ)
+      Delta<--ginv(rll)%*%rl
+      if(mean(abs(Delta))<tol | mean(Delta-Delta_old)==0 | c>100)
+      {break}else{
+        repeat{
+          mm<-0
+          repeat{
+            delta<-gamma_e*Delta
+            index_1<-apply(ZZ,2,function (xx)
+            {ifelse(1+t(lambda+delta)%*%as.matrix(xx,ncol=1)<=1/n,1,0)}
+            )
+            if (sum(index_1)>0)
+            {gamma_e<-gamma_e/2
+            mm<-mm+1}else{break}}
+          index_2<-ifelse(R0der(lambda+delta,ZZ)-R0der(lambda,ZZ)<0,1,0)
+          if (index_2==1)
+          {gamma_e<-gamma_e/2}else{break}
+        }
+        Delta_old<-Delta
+      }
+      lambda<-lambda+delta
+      c<-c+1
+      gamma_e<-(c)^(-0.5)
+    }
+    lambda
+  }
+  
+  ##first derivative of -log EL
+  R1der<-function(lambda,ZZ)
+  {
+    apply(ZZ,2,function(xx)
+    {as.matrix(xx,ncol=1)/as.vector((1+t(lambda)%*%as.matrix(xx,ncol=1)))})%*%
+      rep(1,ncol(ZZ))
+  }
+  
+  #second derivative of -log EL
+  R2der<-function(lambda,ZZ)
+  {
+    r2der<-0
+    for(i in 1:ncol(ZZ))
+    {
+      r2der_i<--as.matrix(ZZ[,i],ncol=1)%*%t(as.matrix(ZZ[,i],ncol=1))/
+        as.vector(1+t(lambda)%*%as.matrix(ZZ[,i],ncol=1))^2
+      r2der<-r2der+r2der_i
+    }
+    r2der
+  }
+  
+  #-log EL
+  R0der<-function(lambda,ZZ)
+  {
+    apply(ZZ,2, function (xx) {log(as.vector(1+t(lambda)%*%as.matrix(xx,ncol=1)))})%*%
+      rep(1,ncol(ZZ))
+  }
+  
+  lambda_beta_ini<-lambda_find_beta_ini(gamma_initial=gamma_initial)
+  ZZ<-ee_ib_beta_ini(gamma_initial)
+  prop_beta_ini<-apply(ZZ,2,function(xx){1/(1+t(matrix(lambda_beta_ini,ncol=1))%*%xx)})
+  
+  ee_beta_ini<-function(beta_initial)
+  {
+    p_i<-(1+exp(-x_int%*%beta_initial))^(-1)
+    ee<-x_int*c(y_int-p_i)*prop_beta_ini
+    apply(t(ee),1,sum)
+  }
+  
+  beta_initial<-multiroot(f = ee_beta_ini, start = as.vector(beta_mle))$root
+  if(mean(abs(beta_initial))>1){beta_initial<-beta_mle}
+  
+  
+  # #calculate gamma based on external data
+  # gamma_hat<--log((n_ext*0.745861/sum(y_ext)-0.745861)/(1-0.745861))
+  
+  # ##cml
+  # all_results_cml<-information.borrowing_cml(beta_initial=beta_initial,theta_ext=theta_ext_est,
+  #                                         y_int=y_int,x_int=x_int,used_index=used_index)
+  # beta_est_cml<-all_results_cml$beta_est
+  # beta_p_cml<-cbind(beta_p_cml,beta_est_cml)
+  # 
+  # ##gim
+  # all_results_gim<-information.borrowing_gim(beta_initial=beta_initial,
+  #                                        theta_ext_ini=theta_ext_ini,theta_ext_est=theta_ext_est,v_ext=v_ext,
+  #                                        y_int=y_int,x_int=x_int,used_index=used_index)
+  # beta_est_gim<-all_results_gim$beta_est
+  # beta_p_gim<-cbind(beta_p_gim,beta_est_gim)
+  # 
+  # V_asymptotic_gim<-asymptotic_var_general_gim(beta_est=beta_est_gim,
+  #                            theta_est=all_results_gim$theta_est,v_ext=v_ext,
+  #                            y_int=y_int,x_int=x_int,used_index=used_index)
+  # V_asymptotic_gim<-V_asymptotic_gim[-c(1:nrow(v_ext)),-c(1:nrow(v_ext))]
+  # beta_v_gim_iter<-sqrt(diag(V_asymptotic_gim[1:ncol(x_int),1:ncol(x_int)]))
+  # beta_v_gim<-cbind(beta_v_gim,beta_v_gim_iter)
+
+  ##lcml
+  all_results_lcml<-information.borrowing_lcml(beta_initial=beta_initial,gamma_initial=gamma_initial,theta_ext=theta_ext_est,
+                                       y_int=y_int,x_int=x_int,used_index=used_index)
+  beta_est_inter<-all_results_lcml$beta_est
+  gamma_est_inter<-all_results_lcml$gamma_est
+  
+  #now calculate A B and Delta
+  ee_abd<-function(x_int,theta_ext,used_index,beta,gamma)
+  {
+    p_i<-(1+exp(-x_int%*%beta))^(-1)
+    p_red_i<-(1+exp(-x_int[,used_index]%*%theta_ext))^(-1)
+
+    #derivative of estimating function
+    abd<-lapply(1:n,function(x)
+    {
+      a_i<--x_int[x,used_index]%*%t(x_int[x,used_index])*
+        (exp(gamma)*p_i[x]+1-p_i[x])*c(p_red_i[x])*c(1-p_red_i[x])
+      b_i<-x_int[x,used_index]%*%t(x_int[x,used_index])*((1-p_red_i[x])^2*exp(gamma)*p_i[x]+
+                                                           (0-p_red_i[x])^2*(1-p_i[x]))
+      d_i<-(exp(gamma)*p_i[x]+1-p_i[x])
+        
+      rbind(a_i,b_i,d_i)
+    }
+    )
+    abd<-do.call(cbind,abd)
+    return(abd)
+  }
+  index.inter<-rep(1:length(used_index),times=n)
+  weight<-1/n
+  
+  tt<-1
+
+  #theta_ext_est<-theta_ext_ini
+  repeat{
+  output.all<-ee_abd(x_int,theta_ext=theta_ext_ini,used_index,beta=beta_est_inter,gamma=gamma_est_inter)
+  Ahat<-rep()
+  Bhat<-rep()
+  for(ii in 1:length(used_index))
+  {
+    Ahat_ii<-apply(output.all[1:length(used_index),index.inter==ii]*weight,1,sum)
+    Bhat_ii<-apply(output.all[(length(used_index)+1):(2*length(used_index)),
+                              index.inter==ii]*weight,1,sum)
+    Ahat<-cbind(Ahat,Ahat_ii)
+    Bhat<-cbind(Bhat,Bhat_ii)
+  }
+  v_ext<-ginv(Ahat)%*%Bhat%*%ginv(Ahat)/n_ext*mean(output.all[(2*length(used_index)+1),])
+  
+  ##information borrow lgim
+  all_results<-information.borrowing_lgim(beta_initial=beta_est_inter,gamma_initial=gamma_est_inter,
+                                     theta_ext_ini=theta_ext_ini,theta_ext_est=theta_ext_est,v_ext=v_ext,
+                                     y_int=y_int,x_int=x_int,used_index=used_index)
+
+  beta_est_inter_new<-all_results$beta_est
+  gamma_est_inter<-all_results$gamma_est
+  theta_ext_est<-all_results$theta_est
+  
+  if (mean(abs(beta_est_inter_new-beta_est_inter))<1e-3 | tt>5)
+  {break}else{
+    beta_est_inter<-beta_est_inter_new
+    weight<-c(all_results$Pi)
+    #print(tt)
+    tt<-tt+1
+  }
+  }
+  
+  beta_est<-all_results$beta_est
+  gamma_est<-all_results$gamma_est
+  theta_est<-all_results$theta_est
+  
+  # V_asymptotic<-asymptotic_var(beta_est=beta_est,gamma_est=gamma_est,
+  #                          theta_est=theta_est,v_ext=v_ext,
+  #                          y_int=y_int,x_int=x_int,used_index=used_index)
+  V_asymptotic<-asymptotic_var_general(beta_est=beta_est,gamma_est=gamma_est,
+                               theta_est=theta_est,v_ext=v_ext,
+                               y_int=y_int,x_int=x_int,used_index=used_index)
+  V_asymptotic<-V_asymptotic[-c(1:nrow(v_ext)),-c(1:nrow(v_ext))]
+  beta_v_iter<-sqrt(diag(V_asymptotic[1:ncol(x_int),1:ncol(x_int)]))
+  gamma_v_iter<-sqrt((V_asymptotic[ncol(x_int)+1,ncol(x_int)+1]))
+  theta_v_iter<-sqrt(diag(V_asymptotic[-c(1:(ncol(x_int)+1)),-c(1:(ncol(x_int)+1))]))
+  
+  beta_cp_iter<-ifelse(betaT>beta_est-1.96*beta_v_iter &
+                    betaT<beta_est+1.96*beta_v_iter,1,0)
+  gamma_cp_iter<-ifelse(gammaT>gamma_est-1.96*gamma_v_iter &
+                         gammaT<gamma_est+1.96*gamma_v_iter,1,0)
+  
+  
+  beta_p<-cbind(beta_p,beta_est)
+  gamma_p<-cbind(gamma_p,gamma_est)
+  theta_p<-cbind(theta_p,theta_est)
+  
+  beta_v<-cbind(beta_v,beta_v_iter)
+  gamma_v<-cbind(gamma_v,gamma_v_iter)
+  theta_v<-cbind(theta_v,theta_v_iter)
+  
+  beta_cp<-cbind(beta_cp,beta_cp_iter)
+  gamma_cp<-cbind(gamma_cp,gamma_cp_iter)
+  
+  
+  beta_mle_all<-cbind(beta_mle_all,beta_mle)
+  
+  print(iter)
+}
+
+#Bias
+apply(beta_p,1,mean)-betaT
+apply(beta_mle_all,1,mean)-betaT
+mean(gamma_p)-0.5
+
+#MCSD
+apply(beta_p,1,sd)
+apply(beta_mle_all,1,sd)
+sd(gamma_p)
+apply(theta_p,1,sd)
+
+#ESE
+apply(beta_v,1,mean)
+mean(gamma_v)
+apply(theta_v,1,mean)
+# 
+# #summary
+# gammaT<-0.5
+# Bias<-cbind(Bias_prop=c(apply(beta_p,1,mean)-betaT,mean(gamma_p)-gammaT),
+#             Bias_mle=c(apply(beta_mle_all,1,mean)-betaT,NA))
+# MCSD<-cbind(MCSD_prop=c(apply(beta_p,1,sd),sd(gamma_p)),
+#             MCSD_mle=c(apply(beta_mle_all,1,sd),NA))
+# 
+# table<-cbind(True.value=c(betaT,gammaT),Bias,MCSD)
+# rownames(table)<-c("Intercept","X1","X2","X3","X4","Z1","Z2","Gamma")
+# round(table,3)
+
+output<-list(
+  beta_p_cml=beta_p_cml,
+  beta_p_gim=beta_p_gim,
+  beta_p_lcml=beta_p_lcml,
+  gamma_p_lcml=gamma_p_lcml,
+  
+  beta_p=beta_p,
+  beta_mle_all=beta_mle_all,
+  gamma_p=gamma_p,
+  theta_p=theta_p,
+  
+  beta_v=beta_v,
+  gamma_v=gamma_v,
+  theta_v=theta_v,
+  
+  beta_v_gim=beta_v_gim,
+  
+  beta_cp=beta_cp,
+  gamma_cp=gamma_cp
+)
+
+setwd("/data/mprc_data3/chixiang/label_shift/codes_manuscript/unknownv/n2_300_gamma05/")
+fname<-paste0("label_uncertain", seed, ".rds")
+
+saveRDS(output, file = fname)
+
+
+
