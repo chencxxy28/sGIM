@@ -13,6 +13,7 @@ Suggests:
     rmarkdown
 VignetteBuilder: knitr
 RoxygenNote: 7.2.3
-URL: https://github.com/chencxxy28/sGIM
+URL: https://github.com/chencxxy28/sGIM,
+    https://chencxxy28.github.io/sGIM/
 Imports: mvtnorm,rootSolve,MASS,Matrix,sandwich
 Depends: R (>= 3.5.0)
