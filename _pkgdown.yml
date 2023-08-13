@@ -1,4 +1,15 @@
+title: sGIM
 url: https://chencxxy28.github.io/sGIM/
 template:
-  bootstrap: 5
+  params:
+    bootswatch: cosmo
+navbar:
+  type: inverse
+  left:
+  - icon: fa-home
+    href: index.html
+  - text: Tutorial
+    href: articles/NAME-OF-VIGNETTE.html
+  - text: Functions
+    href: reference/index.html
 

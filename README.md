@@ -18,7 +18,7 @@ devtools::install_github("chencxxy28/sGIM")
 
 # Vignettes
 
-Please visit [Tutorial](https://chencxxy28.github.io/eMultiMR/articles/NAME-OF-VIGNETTE.html)
+Please visit [Tutorial](https://chencxxy28.github.io/sGIM/articles/NAME-OF-VIGNETTE.html)
 
 
 
