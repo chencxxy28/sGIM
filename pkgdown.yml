@@ -3,7 +3,7 @@ pkgdown: 2.0.7
 pkgdown_sha: ~
 articles:
   NAME-OF-VIGNETTE: NAME-OF-VIGNETTE.html
-last_built: 2023-08-13T21:40Z
+last_built: 2023-08-13T21:47Z
 urls:
   reference: https://chencxxy28.github.io/sGIM/reference
   article: https://chencxxy28.github.io/sGIM/articles
